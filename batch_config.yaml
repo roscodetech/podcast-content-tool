@@ -1,0 +1,52 @@
+# Podcast Content Automation - Batch Configuration
+# This file allows you to process multiple episodes at once
+
+# Default settings applied to all episodes (can be overridden per episode)
+defaults:
+  mcp_url: "http://localhost:8000"
+  gdrive_folder_id: null  # Set your default Google Drive folder ID here
+  generate_slides: true
+  generate_blog: true
+  generate_social_images: true
+  generate_soundbites: true
+  generate_summary: true
+
+# List of episodes to process
+episodes:
+  - name: "Recovery Strategies for Athletes"
+    url: "https://www.youtube.com/watch?v=example1"
+    # Override defaults for this episode
+    generate_slides: false  # Skip slides for this one
+    
+  - name: "Nutrition Myths Debunked Episode 5"
+    url: "https://www.youtube.com/watch?v=example2"
+    
+  - name: "Training Periodization Deep Dive"
+    url: "https://spotify.link/example3"
+    generate_social_images: false  # Skip social images
+    
+  - name: "Sleep Optimization for Performance"
+    url: "https://www.youtube.com/watch?v=example4"
+    gdrive_folder_id: "1DIFFERENT_FOLDER_ID"  # Different folder for this episode
+
+# Processing options
+processing:
+  # Wait time between episodes (seconds) to avoid rate limits
+  delay_between_episodes: 60
+  
+  # Maximum concurrent jobs (1 = sequential processing)
+  max_concurrent: 1
+  
+  # Continue processing if one episode fails
+  continue_on_error: true
+
+# Output options
+output:
+  # Base directory for all outputs (default: ~/podcast_content_outputs)
+  base_directory: null
+  
+  # Create summary report after batch processing
+  create_summary_report: true
+  
+  # Upload summary report to Google Drive
+  upload_summary_to_gdrive: true
