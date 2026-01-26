@@ -38,7 +38,8 @@ class ContentConfig:
     generate_social_images: bool = True
     generate_soundbites: bool = True
     generate_summary: bool = True
-    gdrive_folder_id: Optional[str] = None
+    # Default Google Drive folder for podcast content uploads
+    gdrive_folder_id: Optional[str] = "1B2QpuUeXxiq-aKuM3jkfb9aBK3eBObkb"
 
 
 class NotebookLMClient:
@@ -89,76 +90,71 @@ class NotebookLMClient:
             return {}
 
     def download_artifact(self, url: str, output_path: Path) -> bool:
-        """Download an artifact using Playwright with authenticated browser"""
+        """Download an artifact using Playwright with authenticated browser profile.
+
+        Both PDFs and images from NotebookLM trigger browser downloads,
+        so we use expect_download for all artifact types.
+        """
         try:
             from playwright.sync_api import sync_playwright
 
-            cookies = self._load_auth_cookies()
-            if not cookies:
-                logger.error("No auth cookies available")
+            # Use persistent profile for authentication
+            profile_dir = Path.home() / '.notebooklm-mcp' / 'playwright_profile'
+
+            if not profile_dir.exists():
+                logger.error("Download auth not set up. Run: python setup_download_auth.py")
                 return False
 
-            # Convert cookies to Playwright format
-            playwright_cookies = []
-            for name, value in cookies.items():
-                playwright_cookies.append({
-                    'name': name,
-                    'value': value,
-                    'domain': '.google.com',
-                    'path': '/'
-                })
-
             with sync_playwright() as p:
-                # Launch browser
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context()
+                # Use persistent context with saved auth
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=True,
+                    args=['--disable-blink-features=AutomationControlled'],
+                    accept_downloads=True
+                )
 
-                # Add cookies
-                context.add_cookies(playwright_cookies)
-
-                # Create a new page and navigate to download URL
                 page = context.new_page()
 
-                # For direct file downloads, we need to handle the download event
-                if 'contribution.usercontent.google.com' in url or url.endswith('.pdf'):
-                    # PDF download - wait for download
-                    with page.expect_download() as download_info:
-                        page.goto(url)
+                # All NotebookLM artifact URLs trigger downloads
+                try:
+                    with page.expect_download(timeout=120000) as download_info:
+                        try:
+                            page.goto(url)
+                        except Exception as e:
+                            # "Download is starting" error is expected and means it's working
+                            if 'Download is starting' not in str(e):
+                                raise
+
                     download = download_info.value
-                    download.save_as(output_path)
-                    logger.info(f"Downloaded via Playwright: {output_path}")
-                else:
-                    # Image URL - fetch content directly
-                    response = page.goto(url)
-                    if response and response.ok:
-                        content = response.body()
-                        # Check if it's actually an image
-                        if content[:4] in [b'\x89PNG', b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1', b'GIF8']:
-                            with open(output_path, 'wb') as f:
-                                f.write(content)
-                            logger.info(f"Downloaded image: {output_path} ({len(content)} bytes)")
-                        elif b'<!doctype' in content[:100].lower() or b'<html' in content[:100].lower():
-                            logger.error("Received HTML instead of image - auth may have failed")
-                            browser.close()
-                            return False
-                        else:
-                            # Assume it's valid content
-                            with open(output_path, 'wb') as f:
-                                f.write(content)
-                            logger.info(f"Downloaded: {output_path} ({len(content)} bytes)")
+                    logger.info(f"Downloading: {download.suggested_filename}")
+                    download.save_as(str(output_path))
+
+                    # Verify download
+                    if output_path.exists():
+                        size = output_path.stat().st_size
+                        logger.info(f"Downloaded: {output_path} ({size} bytes)")
+                        context.close()
+                        return True
                     else:
-                        logger.error(f"Failed to fetch URL: {response.status if response else 'No response'}")
-                        browser.close()
+                        logger.error("Download completed but file not found")
+                        context.close()
                         return False
 
-                browser.close()
-                return True
+                except Exception as e:
+                    # Check if we were redirected to login
+                    if 'accounts.google.com' in page.url:
+                        logger.error("Redirected to login - run setup_download_auth.py to re-authenticate")
+                    else:
+                        logger.error(f"Download failed: {e}")
+                    context.close()
+                    return False
 
         except ImportError:
             logger.error("Playwright not installed. Run: pip install playwright && playwright install chromium")
             return False
         except Exception as e:
-            logger.error(f"Error downloading artifact with Playwright: {e}")
+            logger.error(f"Error downloading artifact: {e}")
             return False
         
     def _ensure_process(self):
@@ -688,18 +684,21 @@ class PodcastContentAutomation:
             logger.info("Waiting for source to be processed...")
             time.sleep(30)  # Give NotebookLM time to process
             
-            # Create episode folder
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Create episode folder with format: [notebook_name]_[yyyy-mm-dd]
+            timestamp = datetime.now().strftime("%Y-%m-%d")
             episode_folder = self.output_dir / f"{config.notebook_name}_{timestamp}"
             episode_folder.mkdir(parents=True, exist_ok=True)
             
-            # Create Google Drive folder if configured
+            # Create Google Drive subfolder for this episode
             gdrive_folder_id = None
             if config.gdrive_folder_id and self.gdrive.service:
+                folder_name = f"{config.notebook_name}_{timestamp}"
                 gdrive_folder_id = self.gdrive.create_folder(
-                    f"{config.notebook_name}_{timestamp}",
+                    folder_name,
                     config.gdrive_folder_id
                 )
+                if gdrive_folder_id:
+                    logger.info(f"Created Google Drive folder: {folder_name}")
             
             # Generate summaries
             if config.generate_summary:
@@ -828,15 +827,24 @@ def main():
     parser = argparse.ArgumentParser(description='Podcast to Content Automation')
     parser.add_argument('episode_url', help='URL of the podcast episode')
     parser.add_argument('--name', required=True, help='Name for the notebook')
-    parser.add_argument('--gdrive-folder', help='Google Drive folder ID for uploads')
+    parser.add_argument('--gdrive-folder', help='Google Drive folder ID for uploads (default: podcast content folder)')
+    parser.add_argument('--no-gdrive', action='store_true', help='Skip Google Drive upload')
     parser.add_argument('--no-slides', action='store_true', help='Skip slide generation')
     parser.add_argument('--no-blog', action='store_true', help='Skip blog post generation')
     parser.add_argument('--no-social', action='store_true', help='Skip social media images')
     parser.add_argument('--no-soundbites', action='store_true', help='Skip soundbites')
     parser.add_argument('--no-summary', action='store_true', help='Skip summaries')
-    
+
     args = parser.parse_args()
-    
+
+    # Determine Google Drive folder: use provided, default, or None if disabled
+    if args.no_gdrive:
+        gdrive_folder = None
+    elif args.gdrive_folder:
+        gdrive_folder = args.gdrive_folder
+    else:
+        gdrive_folder = "1B2QpuUeXxiq-aKuM3jkfb9aBK3eBObkb"  # Default folder
+
     config = ContentConfig(
         episode_url=args.episode_url,
         notebook_name=args.name,
@@ -845,7 +853,7 @@ def main():
         generate_social_images=not args.no_social,
         generate_soundbites=not args.no_soundbites,
         generate_summary=not args.no_summary,
-        gdrive_folder_id=args.gdrive_folder
+        gdrive_folder_id=gdrive_folder
     )
     
     automation = PodcastContentAutomation()
